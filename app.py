@@ -308,8 +308,12 @@ div[data-testid="stColumn"] div.stButton > button {
     div[data-testid="stColumn"] div.stButton > button { min-height: 2.75rem; }
 }
 /* live poster wall behind everything */
+.wall-frame {
+    position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh;
+    overflow: hidden; z-index: 0; pointer-events: none;
+}
 .wall {
-    position: fixed; inset: -12% -8%; z-index: 0; pointer-events: none;
+    position: absolute; inset: -12% -8%; pointer-events: none;
     display: flex; flex-direction: column; gap: 18px; justify-content: center;
     transform: rotate(-7deg) scale(1.1);
     opacity: 0.16;
@@ -321,7 +325,8 @@ div[data-testid="stColumn"] div.stButton > button {
 .wall .strip.slow { animation-duration: 130s; }
 .wall img { height: 210px; width: 140px; object-fit: cover; border-radius: 10px; flex: none; }
 @keyframes drift { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-div[data-testid="stElementContainer"]:has(.wall) { height: 0; margin: 0; padding: 0; }
+html, body, [data-testid="stApp"], [data-testid="stAppViewContainer"], [data-testid="stMain"] { overflow-x: hidden !important; max-width: 100%; }
+div[data-testid="stElementContainer"]:has(.wall-frame) { height: 0; margin: 0; padding: 0; }
 .block-container {
     position: relative; z-index: 1;
     background: rgba(24, 8, 17, 0.72);
@@ -421,7 +426,7 @@ def wall_html(urls):
             for u in row + row
         )
         out.append(f'<div class="strip {cls}">{imgs}</div>')
-    return '<div class="wall" aria-hidden="true">' + "".join(out) + "</div>"
+    return '<div class="wall-frame" aria-hidden="true"><div class="wall">' + "".join(out) + "</div></div>"
 
 
 st.markdown(STYLE, unsafe_allow_html=True)
