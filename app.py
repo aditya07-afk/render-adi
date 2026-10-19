@@ -1,5 +1,8 @@
 import html
+import os
 import math
+import random
+from concurrent.futures import ThreadPoolExecutor
 import pickle
 import re
 from urllib.parse import quote_plus
@@ -18,13 +21,17 @@ st.set_page_config(
 # ----------------------------------------------------------------------------
 # Data and recommendation logic (same as before; see the two marked fixes below)
 # ----------------------------------------------------------------------------
+# Key kept as before so posters keep working. Set OMDB_API_KEY on Render to override it.
+OMDB_KEY = os.environ.get("OMDB_API_KEY", "bfdb5c3a")
+
+
 def fetch_poster(movie_title):
     try:
         response = requests.get(
             "https://www.omdbapi.com/",
             params={
                 "t": movie_title,
-                "apikey": "bfdb5c3a"
+                "apikey": OMDB_KEY
             },
             timeout=10
         )
@@ -284,7 +291,7 @@ div[data-testid="stColumn"] div.stButton > button {
 }
 /* phones: Streamlit stacks the columns, so show each card as a compact row */
 @media (max-width: 640px) {
-    .block-container { padding-left: 1rem; padding-right: 1rem; padding-top: 1.2rem; }
+    .block-container { padding-left: 1rem !important; padding-right: 1rem !important; padding-top: 1.2rem; border-radius: 14px; }
     .hero { margin-bottom: 1.2rem; }
     .hero p { font-size: 1rem; }
     .because b { font-size: 1.25rem; }
@@ -299,6 +306,47 @@ div[data-testid="stColumn"] div.stButton > button {
     .ticket .stub { flex-direction: column; align-items: flex-start; justify-content: center; }
     .ticket .watch a { padding: 0.4rem 0.75rem; }
     div[data-testid="stColumn"] div.stButton > button { min-height: 2.75rem; }
+}
+/* live poster wall behind everything */
+.wall {
+    position: fixed; inset: -12% -8%; z-index: 0; pointer-events: none;
+    display: flex; flex-direction: column; gap: 18px; justify-content: center;
+    transform: rotate(-7deg) scale(1.1);
+    opacity: 0.16;
+    -webkit-mask-image: radial-gradient(ellipse at 50% 40%, rgba(0,0,0,0.55) 0%, #000 75%);
+    mask-image: radial-gradient(ellipse at 50% 40%, rgba(0,0,0,0.55) 0%, #000 75%);
+}
+.wall .strip { display: flex; gap: 18px; width: max-content; animation: drift 90s linear infinite; }
+.wall .strip.back { animation-direction: reverse; animation-duration: 110s; }
+.wall .strip.slow { animation-duration: 130s; }
+.wall img { height: 210px; width: 140px; object-fit: cover; border-radius: 10px; flex: none; }
+@keyframes drift { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+div[data-testid="stElementContainer"]:has(.wall) { height: 0; margin: 0; padding: 0; }
+.block-container {
+    position: relative; z-index: 1;
+    background: rgba(24, 8, 17, 0.72);
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    border-radius: 22px;
+    padding-left: 2.2rem !important; padding-right: 2.2rem !important;
+}
+.hero h1, .because b { text-shadow: 0 2px 18px rgba(0, 0, 0, 0.7); }
+button[data-baseweb="tab"] p { color: var(--muted); font-weight: 700; }
+button[data-baseweb="tab"][aria-selected="true"] p { color: var(--cream); }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p { color: var(--muted) !important; }
+[data-testid="stRadio"] label p { color: var(--cream) !important; }
+[data-testid="stPopoverBody"] { background: #2a1220; border: 1px solid rgba(219, 165, 74, 0.5); }
+[data-testid="stPopoverBody"] p, [data-testid="stPopoverBody"] li { color: var(--cream) !important; }
+.facts { color: var(--cream); line-height: 1.6; font-size: 0.95rem; }
+.facts b { color: var(--brass); }
+.clue { background: rgba(244, 234, 211, 0.08); border-left: 3px solid var(--brass); padding: 0.7rem 1rem; margin: 0.5rem 0; border-radius: 6px; color: var(--cream); }
+.clue b { color: var(--brass); }
+@media (max-width: 640px) { .wall img { height: 150px; width: 100px; } .wall { opacity: 0.24; } }
+@media (prefers-reduced-motion: reduce) { .wall .strip { animation: none; } }
+
+.ticket .tag {
+    position: absolute; top: 10px; right: 10px; z-index: 2;
+    background: var(--brass); color: var(--ink); font-weight: 800; font-size: 0.72rem;
+    padding: 2px 9px; border-radius: 999px;
 }
 .hint {
     margin-top: 1.6rem; padding: 1.1rem 1.3rem; max-width: 640px;
@@ -315,6 +363,7 @@ def watch_links(title):
         ("Netflix", f"https://www.netflix.com/search?q={q}"),
         ("Prime Video", f"https://www.primevideo.com/search/?phrase={q}"),
         ("JustWatch", f"https://www.justwatch.com/in/search?q={q}"),
+        ("Trailer", f"https://www.youtube.com/results?search_query={quote_plus(title + ' official trailer')}"),
     ]
     links = "".join(
         f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{name}</a>'
@@ -323,7 +372,7 @@ def watch_links(title):
     return f'<div class="watch"><span>Watch on</span>{links}</div>'
 
 
-def ticket_html(rank, title, poster):
+def ticket_html(rank, title, poster, note=""):
     safe_title = html.escape(title)
     if poster:
         art = f'<img src="{html.escape(poster, quote=True)}" alt="Poster of {safe_title}" loading="lazy">'
@@ -331,13 +380,52 @@ def ticket_html(rank, title, poster):
         art = '<div class="blank"><span>🎬</span>Poster unavailable</div>'
     return (
         f'<div class="ticket" style="--i:{rank - 1}">'
-        f'<div class="no">No. {rank}</div>{art}'
+        f'<div class="no">No. {rank}</div>'
+        + (f'<div class="tag">{html.escape(note)}</div>' if note else "")
+        + f'{art}'
         f'<div class="stub"><div class="name">{safe_title}</div>{watch_links(title)}</div>'
         f'</div>'
     )
 
 
+WALL_TITLES = [
+    "Avatar", "The Dark Knight", "Inception", "Interstellar", "Titanic", "The Avengers",
+    "Jurassic Park", "The Matrix", "Gladiator", "Toy Story", "Finding Nemo", "The Lion King",
+    "Pulp Fiction", "Forrest Gump", "Fight Club", "The Godfather", "Star Wars", "Skyfall",
+    "Iron Man", "Batman Begins", "Shrek", "Up", "Django Unchained", "Mad Max: Fury Road",
+    "The Prestige", "Casino Royale", "Spider-Man", "Gravity", "Deadpool", "Inside Out",
+    "Kung Fu Panda", "Back to the Future", "Alien", "Blade Runner", "Braveheart", "The Departed",
+]
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def wall_posters():
+    """Fetch posters of well-known movies once (in parallel) for the animated background."""
+    titles = [t for t in WALL_TITLES if t in set(movies["title"])]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        found = list(pool.map(fetch_poster, titles))
+    return [p for p in found if p]
+
+
+def wall_html(urls):
+    if len(urls) < 6:
+        return ""
+    urls = list(urls)
+    random.Random(7).shuffle(urls)
+    rows = [urls[0::3], urls[1::3], urls[2::3]]
+    classes = ["", "back", "slow"]
+    out = []
+    for row, cls in zip(rows, classes):
+        imgs = "".join(
+            f'<img src="{html.escape(u, quote=True)}" alt="" loading="lazy" decoding="async">'
+            for u in row + row
+        )
+        out.append(f'<div class="strip {cls}">{imgs}</div>')
+    return '<div class="wall" aria-hidden="true">' + "".join(out) + "</div>"
+
+
 st.markdown(STYLE, unsafe_allow_html=True)
+st.markdown(wall_html(wall_posters()), unsafe_allow_html=True)
 
 n_titles = movies["title"].nunique()
 st.markdown(
@@ -353,6 +441,65 @@ st.markdown(
 
 if "pick" not in st.session_state:
     st.session_state["pick"] = None
+    # Share link: ?movie=Avatar opens the app with that movie already chosen
+    shared = st.query_params.get("movie")
+    if shared and shared in set(movies["title"]):
+        st.session_state["pick"] = shared
+
+if "favs" not in st.session_state:
+    st.session_state["favs"] = []
+
+
+def toggle_fav(title):
+    favs = st.session_state["favs"]
+    if title in favs:
+        favs.remove(title)
+    else:
+        favs.append(title)
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def omdb_details(title):
+    """Year, genre, director, cast, plot and rating from OMDb; None if unavailable."""
+    try:
+        r = requests.get(
+            "https://www.omdbapi.com/",
+            params={"t": title, "apikey": OMDB_KEY, "plot": "short"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        d = r.json()
+        return d if d.get("Response") == "True" else None
+    except (requests.exceptions.RequestException, ValueError, AttributeError):
+        return None
+
+
+def card_extras(prefix, i, title):
+    """Details popover and save button under a card."""
+    with st.popover("Details", width="stretch"):
+        d = omdb_details(title)
+        if d:
+            rows = [
+                ("Year", d.get("Year")), ("Genre", d.get("Genre")), ("Director", d.get("Director")),
+                ("Cast", d.get("Actors")), ("IMDb rating", d.get("imdbRating")), ("Runtime", d.get("Runtime")),
+            ]
+            facts = "".join(
+                f"<div><b>{k}:</b> {html.escape(str(v))}</div>" for k, v in rows if v and v != "N/A"
+            )
+            plot = d.get("Plot")
+            if plot and plot != "N/A":
+                facts += f"<p style='margin-top:0.6rem'>{html.escape(plot)}</p>"
+            st.markdown(f'<div class="facts">{facts}</div>', unsafe_allow_html=True)
+        else:
+            st.write("Details are not available right now.")
+    saved = title in st.session_state["favs"]
+    st.button(
+        "♥ Saved" if saved else "♡ Save",
+        key=f"fav_{prefix}_{i}",
+        on_click=toggle_fav,
+        args=(title,),
+        width="stretch",
+    )
 
 
 def set_pick(title):
@@ -369,7 +516,9 @@ def cached_recommend(title):
     return recommend(title)
 
 
-tab_similar, tab_plot = st.tabs(["Similar movies", "Describe the plot"])
+tab_similar, tab_plot, tab_duo, tab_list, tab_game, tab_how = st.tabs(
+    ["Similar movies", "Describe the plot", "Movie night for two", "My list", "Guess the movie", "How it works"]
+)
 
 with tab_similar:
     pick_col, rand_col = st.columns([4, 1], vertical_alignment="bottom")
@@ -383,6 +532,11 @@ with tab_similar:
         )
     with rand_col:
         st.button("Surprise me", on_click=surprise)
+
+    if selected_movies_name:
+        st.query_params["movie"] = selected_movies_name
+    elif "movie" in st.query_params:
+        del st.query_params["movie"]
 
     if selected_movies_name:
         with st.spinner("Finding similar movies..."):
@@ -407,7 +561,9 @@ with tab_similar:
                             key=f"more_{i}",
                             on_click=set_pick,
                             args=(names[i],),
+                            width="stretch",
                         )
+                        card_extras("sim", i, names[i])
         else:
             st.warning("No recommendations found for this movie.")
     else:
@@ -491,6 +647,7 @@ with tab_plot:
                             ticket_html(i + 1, found[i], cached_poster(found[i])),
                             unsafe_allow_html=True,
                         )
+                        card_extras("plot", i, found[i])
         else:
             st.warning("No movie matches those words. Try simpler ones, such as war, love, alien or crime.")
     else:
@@ -499,3 +656,198 @@ with tab_plot:
             'We look for them in each movie\'s overview, keywords, genres, cast and director.</div>',
             unsafe_allow_html=True,
         )
+
+
+# ----------------------------------------------------------------------------
+# Tab 3: movie night for two - one list that suits both people
+# ----------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def duo_picks(a, b):
+    """Combine the neighbour lists of two movies. A movie that both lists contain ranks first."""
+    def neighbours(title):
+        rows = movies[movies["title"] == title]
+        if rows.empty:
+            return {}
+        out = {}
+        for i, sc in similirety.get(rows.index[0], []):
+            t = movies.iloc[i]["title"]
+            if t not in (a, b):
+                out[t] = max(out.get(t, 0), float(sc))
+        return out
+
+    na, nb = neighbours(a), neighbours(b)
+    both = {t: na[t] + nb[t] for t in na if t in nb}
+    ranked = sorted(both, key=both.get, reverse=True)
+    singles = {t: sc for d in (na, nb) for t, sc in d.items() if t not in both}
+    ranked += sorted(singles, key=singles.get, reverse=True)
+    return [(t, "Both" if t in both else "") for t in ranked[:5]]
+
+
+with tab_duo:
+    st.markdown(
+        '<div class="because">Two people, one movie<b>Pick one film each</b></div>',
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        duo_a = st.selectbox("First person likes", movies["title"].values, index=None,
+                             key="duo_a", placeholder="Type a movie...")
+    with c2:
+        duo_b = st.selectbox("Second person likes", movies["title"].values, index=None,
+                             key="duo_b", placeholder="Type a movie...")
+
+    if duo_a and duo_b and duo_a != duo_b:
+        picks = duo_picks(duo_a, duo_b)
+        if picks:
+            st.caption("Movies marked Both appear in the similar-movie lists of both picks.")
+            cols = st.columns(5, gap="medium")
+            for i, col in enumerate(cols):
+                with col:
+                    if i < len(picks):
+                        t, note = picks[i]
+                        st.markdown(
+                            ticket_html(i + 1, t, cached_poster(t), note),
+                            unsafe_allow_html=True,
+                        )
+                        card_extras("duo", i, t)
+        else:
+            st.warning("No shared picks found for these two movies.")
+    elif duo_a and duo_b:
+        st.warning("Choose two different movies.")
+    else:
+        st.markdown(
+            '<div class="hint">Choose one movie each. We combine both similar-movie lists '
+            'and put movies that suit both of you first.</div>',
+            unsafe_allow_html=True,
+        )
+
+
+# ----------------------------------------------------------------------------
+# Tab 4: saved movies
+# ----------------------------------------------------------------------------
+with tab_list:
+    favs = st.session_state["favs"]
+    if not favs:
+        st.markdown(
+            '<div class="hint">Nothing saved yet. Press Save under any movie and it appears here. '
+            'The list stays while this page is open.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="because">Your list<b>{len(favs)} saved movie{"s" if len(favs) != 1 else ""}</b></div>',
+            unsafe_allow_html=True,
+        )
+        for start in range(0, len(favs), 5):
+            chunk = favs[start:start + 5]
+            cols = st.columns(5, gap="medium")
+            for j, col in enumerate(cols):
+                with col:
+                    if j < len(chunk):
+                        t = chunk[j]
+                        st.markdown(
+                            ticket_html(start + j + 1, t, cached_poster(t)),
+                            unsafe_allow_html=True,
+                        )
+                        card_extras("list", start + j, t)
+
+# ----------------------------------------------------------------------------
+# Tab 5: guess the movie
+# ----------------------------------------------------------------------------
+def mask_title(text, title):
+    for word in re.findall(r"[A-Za-z0-9']+", title):
+        if len(word) > 3:
+            text = re.sub(re.escape(word), "_____", text, flags=re.I)
+    return text
+
+
+def new_round():
+    pool = [t for t in WALL_TITLES if t in set(movies["title"])]
+    random.shuffle(pool)
+    for answer in pool:
+        d = omdb_details(answer)
+        if d:
+            others = random.sample([t for t in pool if t != answer], 3)
+            options = others + [answer]
+            random.shuffle(options)
+            st.session_state["round"] = {"answer": answer, "options": options, "d": d}
+            st.session_state["checked"] = False
+            st.session_state.pop("guess", None)
+            return
+    st.session_state["round"] = None
+
+
+if "score" not in st.session_state:
+    st.session_state["score"] = [0, 0]
+
+
+def check_round():
+    st.session_state["checked"] = True
+    r = st.session_state.get("round")
+    if r and st.session_state.get("guess") is not None:
+        st.session_state["score"][1] += 1
+        if st.session_state["guess"] == r["answer"]:
+            st.session_state["score"][0] += 1
+
+
+with tab_game:
+    if "round" not in st.session_state:
+        new_round()
+    r = st.session_state["round"]
+    if not r:
+        st.warning("Clues could not be loaded right now. Check the internet connection and try again.")
+        st.button("Try again", on_click=new_round, key="retry_round")
+    else:
+        d = r["d"]
+        right, total = st.session_state["score"]
+        st.markdown(
+            f'<div class="because">Guess the movie<b>Score {right} of {total}</b></div>',
+            unsafe_allow_html=True,
+        )
+        clues = [
+            ("Year", d.get("Year")), ("Genre", d.get("Genre")),
+            ("Director", d.get("Director")), ("Cast", d.get("Actors")),
+        ]
+        for k, v in clues:
+            if v and v != "N/A":
+                st.markdown(f'<div class="clue"><b>{k}:</b> {html.escape(str(v))}</div>', unsafe_allow_html=True)
+        plot = d.get("Plot")
+        if plot and plot != "N/A":
+            st.markdown(
+                f'<div class="clue"><b>Plot:</b> {html.escape(mask_title(plot, r["answer"]))}</div>',
+                unsafe_allow_html=True,
+            )
+        st.radio("Which movie is it?", r["options"], index=None, key="guess",
+                 disabled=st.session_state.get("checked", False))
+        b1, b2 = st.columns(2)
+        with b1:
+            st.button("Check answer", on_click=check_round, key="check_btn",
+                      disabled=st.session_state.get("checked", False), width="stretch")
+        with b2:
+            st.button("Next movie", on_click=new_round, key="next_btn", width="stretch")
+        if st.session_state.get("checked"):
+            if st.session_state.get("guess") == r["answer"]:
+                st.success(f"Correct. It is {r['answer']}.")
+            elif st.session_state.get("guess") is None:
+                st.info(f"No answer chosen. It was {r['answer']}.")
+            else:
+                st.error(f"Not this one. It is {r['answer']}.")
+
+# ----------------------------------------------------------------------------
+# Tab 6: how it works
+# ----------------------------------------------------------------------------
+with tab_how:
+    steps = [
+        ("Collect", "Every movie gets one block of text: overview, keywords, genres, top three cast and the director."),
+        ("Clean", "Words are lower-cased and reduced to their stem, so run, runs and running count as one word."),
+        ("Count", f"The 5,000 most common words become the columns. Each of the {n_titles:,} movies becomes a row of word counts."),
+        ("Compare", "Cosine similarity measures how close two rows are. Movies with similar words get a high score."),
+        ("Store", "For each movie only the 10 closest movies are saved. This keeps the file small enough for a free server."),
+        ("Show", "The app reads the list for your movie, skips repeats and shows five, with posters from OMDb."),
+    ]
+    for n, (head, body) in enumerate(steps, 1):
+        st.markdown(
+            f'<div class="clue"><b>{n}. {head}:</b> {html.escape(body)}</div>',
+            unsafe_allow_html=True,
+        )
+    st.caption("This is content-based filtering. It looks only at what a movie is about, not at what other people watched.")
